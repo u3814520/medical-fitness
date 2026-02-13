@@ -1,0 +1,1643 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>智慧醫療肌耐力評估系統</title>
+  
+  <!-- p5.js CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.7.0/p5.min.js"></script>
+  
+  <!-- MediaPipe CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+  
+  <!-- Chart.js for progress tracking -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      font-family: 'Noto Sans TC', -apple-system, BlinkMacSystemFont, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: none;
+      background: #f5f7fa;
+    }
+    
+    main {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+    }
+    
+    video {
+      display: none !important;
+    }
+    
+    /* Loading Screen */
+    #loading {
+      position: fixed;
+      inset: 0;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 9999;
+      color: white;
+    }
+    
+    #loading.hidden {
+      display: none;
+    }
+    
+    .spinner {
+      border: 4px solid rgba(255, 255, 255, 0.3);
+      border-top: 4px solid white;
+      border-radius: 50%;
+      width: 60px;
+      height: 60px;
+      animation: spin 1s linear infinite;
+    }
+    
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
+    .medical-logo {
+      font-size: 48px;
+      margin-bottom: 20px;
+    }
+    
+    /* Button styles */
+    .btn {
+      padding: 15px 30px;
+      border-radius: 12px;
+      border: none;
+      font-size: 18px;
+      font-weight: bold;
+      cursor: pointer;
+      transition: all 0.3s;
+      font-family: inherit;
+    }
+    
+    .btn-primary {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+    
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(102, 126, 234, 0.4);
+    }
+    
+    .btn-secondary {
+      background: white;
+      color: #667eea;
+      border: 2px solid #667eea;
+    }
+    
+    .btn-success {
+      background: #10b981;
+      color: white;
+    }
+    
+    .btn-warning {
+      background: #f59e0b;
+      color: white;
+    }
+    
+    .btn-danger {
+      background: #ef4444;
+      color: white;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="medical-logo">🏥</div>
+    <div class="spinner"></div>
+    <div style="margin-top: 20px; font-size: 20px;">載入 AI 模型中...</div>
+  </div>
+  
+  <main></main>
+  
+  <script>
+    // ==================== 全域變數 ====================
+    let video;
+    let videoElement;  // 原生 HTML video 元素
+    let videoStream;   // MediaStream 物件
+    let pose;
+    let poseResults = null;
+    let modelLoaded = false;
+    
+    // 系統階段
+    let phase = 'loading'; // loading, home, patientInfo, testSelection, testInstructions, testing, result, history
+    
+    // 受測者資料
+    let patient = {
+      name: '',
+      age: '',
+      gender: '',
+      medicalHistory: [],
+      id: null
+    };
+    
+    // 測試類型定義
+    const testTypes = {
+      chairStand: {
+        name: '30秒坐站測試',
+        nameEn: '30-Second Chair Stand',
+        target: '下肢肌力',
+        duration: 30,
+        targetCount: null,
+        ageGroup: '60歲以上',
+        equipment: '有扶手的穩固椅子',
+        icon: '🪑',
+        description: '評估下肢肌力與功能性行動能力，預測跌倒風險',
+        instructions: [
+          '坐在椅子上，背部挺直',
+          '雙腳平放地面，與肩同寬',
+          '雙手交叉放胸前',
+          '站起時膝蓋完全伸直',
+          '坐下時臀部完全接觸椅面',
+          '30秒內盡可能完成多次'
+        ],
+        contraindications: ['急性下背痛', '未控制的高血壓', '近期髖/膝關節手術']
+      },
+      armCurl: {
+        name: '30秒手臂彎舉',
+        nameEn: '30-Second Arm Curl',
+        target: '上肢肌力',
+        duration: 30,
+        targetCount: null,
+        ageGroup: '60歲以上',
+        equipment: '啞鈴（男5磅/女3磅）',
+        icon: '💪',
+        description: '評估上肢肌力與日常生活活動能力',
+        instructions: [
+          '坐在椅子上，背部挺直',
+          '手持啞鈴，手臂自然下垂',
+          '手掌向前，彎曲手肘',
+          '前臂靠近肩膀後放下',
+          '保持上臂固定不動',
+          '30秒內盡可能完成多次'
+        ],
+        contraindications: ['肩關節疼痛', '網球肘', '腕隧道症候群']
+      },
+      balance: {
+        name: '單腳站立測試',
+        nameEn: 'One-Leg Stand Test',
+        target: '平衡能力',
+        duration: 60,
+        targetCount: null,
+        ageGroup: '全年齡',
+        equipment: '無',
+        icon: '⚖️',
+        description: '評估靜態平衡能力，預測跌倒風險',
+        instructions: [
+          '雙手叉腰或自然下垂',
+          '抬起一腳離地約10公分',
+          '盡可能維持平衡',
+          '測量能站立的時間',
+          '身體晃動或腳落地即結束',
+          '兩腳各測試一次'
+        ],
+        contraindications: ['嚴重骨質疏鬆', '近期骨折', '嚴重眩暈']
+      }
+    };
+    
+    // 當前測試
+    let currentTest = null;
+    let testSession = null;
+    
+    // 測試數據
+    let repCount = 0;
+    let currentState = null;
+    let lastStateTime = null;
+    let startTime = null;
+    let endTime = null;
+    let testDuration = 0;
+    let qualityScores = [];
+    let warnings = [];
+    
+    // 角度相關
+    let kneeAngle = null;
+    let armAngle = null;
+    let balanceTime = 0;
+    let balanceLeg = null;
+    
+    // 計時器
+    let timerStartTime = 0;
+    let displayTime = '00.00';
+    
+    // UI 元素
+    let nameInput, ageInput;
+    let medicalCheckboxes = {};
+    
+    // 數據管理
+    let testHistory = [];
+    
+    // ==================== p5.js 設定 ====================
+    
+    function setup() {
+      createCanvas(windowWidth, windowHeight);
+      
+      // 創建原生 video 元素
+      videoElement = document.createElement('video');
+      videoElement.setAttribute('playsinline', '');  // iOS 需要
+      videoElement.setAttribute('autoplay', '');
+      videoElement.style.display = 'none';
+      document.body.appendChild(videoElement);
+      
+      // 使用原生 getUserMedia 啟動攝影機
+      startCamera();
+      
+      initPose();
+      loadTestHistory();
+      
+      textFont('sans-serif');
+    }
+    
+    // 原生方式啟動攝影機
+    async function startCamera() {
+      try {
+        console.log('嘗試啟動攝影機...');
+        
+        // 檢查瀏覽器支援
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          console.error('此瀏覽器不支援 getUserMedia');
+          alert('您的瀏覽器不支援攝影機功能，請使用 Chrome 或更新 Safari');
+          return;
+        }
+        
+        const constraints = {
+          video: {
+            facingMode: 'user',
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+          },
+          audio: false
+        };
+        
+        videoStream = await navigator.mediaDevices.getUserMedia(constraints);
+        console.log('✅ 成功取得攝影機串流');
+        
+        videoElement.srcObject = videoStream;
+        
+        // 等待 video 準備好
+        videoElement.onloadedmetadata = () => {
+          console.log('✅ 影片元數據已載入');
+          videoElement.play();
+        };
+        
+        // 為 p5.js 創建兼容物件
+        video = {
+          elt: videoElement,
+          width: 640,
+          height: 480
+        };
+        
+      } catch (err) {
+        console.error('攝影機啟動失敗:', err);
+        let errorMsg = '無法啟動攝影機\n\n';
+        
+        if (err.name === 'NotAllowedError') {
+          errorMsg += '原因：權限被拒絕\n請允許此網站使用攝影機';
+        } else if (err.name === 'NotFoundError') {
+          errorMsg += '原因：找不到攝影機\n請確認裝置有攝影機';
+        } else if (err.name === 'NotReadableError') {
+          errorMsg += '原因：攝影機被佔用\n請關閉其他使用攝影機的程式';
+        } else {
+          errorMsg += '原因：' + err.message;
+        }
+        
+        alert(errorMsg);
+      }
+    }
+    
+    function draw() {
+      switch(phase) {
+        case 'loading':
+          drawLoading();
+          break;
+        case 'home':
+          drawHome();
+          break;
+        case 'patientInfo':
+          drawPatientInfo();
+          break;
+        case 'testSelection':
+          drawTestSelection();
+          break;
+        case 'testInstructions':
+          drawTestInstructions();
+          break;
+        case 'testing':
+          drawTesting();
+          break;
+        case 'result':
+          drawResult();
+          break;
+        case 'history':
+          drawHistory();
+          break;
+      }
+    }
+    
+    // ==================== MediaPipe 初始化 ====================
+    
+    function initPose() {
+      pose = new Pose({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+      });
+      
+      pose.setOptions({
+        modelComplexity: 1,
+        smoothLandmarks: true,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+      
+      pose.onResults(gotPose);
+      
+      pose.initialize().then(() => {
+        modelLoaded = true;
+        document.getElementById('loading').classList.add('hidden');
+        phase = 'home';
+        detectPose();
+      }).catch((error) => {
+        console.error('模型載入失敗:', error);
+      });
+    }
+    
+    function gotPose(results) {
+      poseResults = results;
+    }
+    
+    async function detectPose() {
+      if (modelLoaded && video && video.elt && video.elt.readyState === 4) {
+        await pose.send({ image: video.elt });
+      }
+      requestAnimationFrame(detectPose);
+    }
+    
+    // ==================== 繪製函式 ====================
+    
+    function drawLoading() {
+      background(240);
+    }
+    
+    function drawHome() {
+      // 醫療風格主頁
+      background(245, 247, 250);
+      
+      // 標題區
+      fill(102, 126, 234);
+      noStroke();
+      rect(0, 0, width, 200);
+      
+      fill(255);
+      textAlign(CENTER, CENTER);
+      textSize(36);
+      textStyle(BOLD);
+      text('🏥 智慧醫療肌耐力評估系統', width/2, 70);
+      
+      textSize(18);
+      textStyle(NORMAL);
+      text('AI-Powered Muscular Endurance Assessment', width/2, 110);
+      
+      textSize(16);
+      fill(255, 255, 255, 200);
+      text('Professional Healthcare Solution', width/2, 140);
+      
+      // 主要按鈕
+      let btnY = 280;
+      let btnSpacing = 100;
+      
+      // 開始新測試按鈕
+      drawButton(width/2 - 150, btnY, 300, 70, '開始新測試', '667eea');
+      
+      // 查看歷史記錄按鈕
+      drawButton(width/2 - 150, btnY + btnSpacing, 300, 70, '歷史記錄', 'ffffff', true);
+      
+      // 系統資訊
+      textAlign(CENTER);
+      fill(100);
+      textSize(14);
+      text('系統版本 v1.0 | AI模型：MediaPipe Pose', width/2, height - 40);
+    }
+    
+    function drawPatientInfo() {
+      background(245, 247, 250);
+      
+      // 標題
+      drawHeader('受測者資料');
+      
+      // 表單卡片
+      let cardW = min(width * 0.9, 600);
+      let cardH = min(height * 0.7, 650);  // 調整高度
+      let cardX = (width - cardW) / 2;
+      let cardY = 150;
+      
+      fill(255);
+      noStroke();
+      drawRoundRect(cardX, cardY, cardW, cardH, 20);
+      
+      // 表單內容
+      fill(60);
+      textAlign(LEFT);
+      textSize(18);
+      textStyle(BOLD);
+      
+      let formX = cardX + 40;
+      let formY = cardY + 40;
+      
+      text('基本資料', formX, formY);
+      
+      // 姓名欄位 - 可點擊編輯
+      textStyle(NORMAL);
+      textSize(16);
+      fill(100);
+      text('姓名', formX, formY + 50);
+      
+      // 姓名顯示框
+      let nameBoxY = formY + 70;
+      let nameBoxH = max(height * 0.07, 50);
+      fill(patient.name ? 255 : 250);
+      stroke(patient.name ? 102 : 220, patient.name ? 126 : 220, patient.name ? 234 : 220);
+      strokeWeight(2);
+      drawRoundRect(formX, nameBoxY, cardW - 80, nameBoxH, 10);
+      
+      fill(patient.name ? 60 : 180);
+      noStroke();
+      textAlign(LEFT, CENTER);
+      textSize(max(width * 0.045, 16));
+      text(patient.name || '點此輸入姓名', formX + 15, nameBoxY + nameBoxH/2);
+      
+      // 年齡欄位
+      let ageY = nameBoxY + nameBoxH + 30;
+      fill(100);
+      textAlign(LEFT, TOP);
+      textSize(16);
+      text('年齡', formX, ageY);
+      
+      // 年齡顯示框
+      let ageBoxY = ageY + 20;
+      let ageBoxH = max(height * 0.07, 50);
+      fill(patient.age ? 255 : 250);
+      stroke(patient.age ? 102 : 220, patient.age ? 126 : 220, patient.age ? 234 : 220);
+      strokeWeight(2);
+      drawRoundRect(formX, ageBoxY, cardW - 80, ageBoxH, 10);
+      
+      fill(patient.age ? 60 : 180);
+      noStroke();
+      textAlign(LEFT, CENTER);
+      textSize(max(width * 0.045, 16));
+      text(patient.age || '點此輸入年齡', formX + 15, ageBoxY + ageBoxH/2);
+      
+      // 性別
+      let genderY = ageBoxY + ageBoxH + 30;
+      fill(100);
+      textAlign(LEFT, TOP);
+      textSize(16);
+      text('性別', formX, genderY);
+      
+      drawGenderButtons(formX, genderY + 30);
+      
+      // 下一步按鈕（固定在底部）
+      let canProceed = patient.name && patient.age && patient.gender;
+      let btnY = height - 100;  // 固定距離底部 100px
+      drawButton(width/2 - 100, btnY, 200, 60, 
+                 '下一步', canProceed ? '667eea' : 'cccccc');
+      
+      // 返回按鈕
+      drawBackButton();
+    }
+    
+    function drawTestSelection() {
+      background(245, 247, 250);
+      
+      drawHeader('選擇測試項目');
+      
+      let startY = 150;
+      let cardSpacing = 20;
+      let cardH = 180;
+      let cardW = min(width * 0.9, 500);
+      let cardX = (width - cardW) / 2;
+      
+      let tests = Object.keys(testTypes);
+      
+      for (let i = 0; i < tests.length; i++) {
+        let test = testTypes[tests[i]];
+        let y = startY + i * (cardH + cardSpacing);
+        
+        drawTestCard(cardX, y, cardW, cardH, test, tests[i]);
+      }
+      
+      drawBackButton();
+    }
+    
+    function drawTestInstructions() {
+      background(245, 247, 250);
+      
+      if (!currentTest) return;
+      
+      let test = testTypes[currentTest];
+      
+      drawHeader(test.icon + ' ' + test.name);
+      
+      let cardW = min(width * 0.9, 700);
+      let cardX = (width - cardW) / 2;
+      let cardY = 150;
+      let cardH = min(height - cardY - 140, 650);  // 動態高度，給按鈕留空間
+      
+      fill(255);
+      noStroke();
+      drawRoundRect(cardX, cardY, cardW, cardH, 20);
+      
+      let contentX = cardX + 30;
+      let contentY = cardY + 30;
+      let contentW = cardW - 60;
+      
+      // 測試說明
+      fill(60);
+      textSize(max(width * 0.04, 16));
+      textStyle(BOLD);
+      text('測試說明', contentX, contentY);
+      
+      textStyle(NORMAL);
+      fill(100);
+      textSize(max(width * 0.035, 14));
+      let descY = contentY + 35;
+      text(test.description, contentX, descY, contentW);
+      
+      // 操作步驟
+      let stepY = descY + 80;
+      fill(60);
+      textStyle(BOLD);
+      textSize(max(width * 0.04, 16));
+      text('操作步驟', contentX, stepY);
+      
+      textStyle(NORMAL);
+      fill(100);
+      textSize(max(width * 0.035, 14));
+      let lineHeight = max(height * 0.04, 30);  // 動態行高
+      stepY += 35;
+      
+      for (let i = 0; i < test.instructions.length; i++) {
+        text(`${i+1}. ${test.instructions[i]}`, contentX, stepY, contentW);
+        stepY += lineHeight;
+      }
+      
+      // 禁忌症警告（如果空間足夠才顯示）
+      if (test.contraindications.length > 0 && stepY < cardY + cardH - 100) {
+        stepY += 20;
+        fill(239, 68, 68);
+        textStyle(BOLD);
+        textSize(max(width * 0.038, 15));
+        text('⚠️ 注意事項', contentX, stepY);
+        
+        textStyle(NORMAL);
+        textSize(max(width * 0.032, 13));
+        stepY += 30;
+        
+        for (let contra of test.contraindications) {
+          if (stepY < cardY + cardH - 40) {  // 確保不超出卡片
+            text('• ' + contra, contentX + 10, stepY, contentW - 20);
+            stepY += 28;
+          }
+        }
+      }
+      
+      // 開始測試按鈕 - 固定在底部
+      let btnY = height - 120;
+      drawButton(width/2 - 100, btnY, 200, 60, '開始測試', '10b981');
+      
+      // 返回按鈕
+      drawBackButton();
+    }
+    
+    function drawTesting() {
+      background(0);
+      
+      // 顯示影片 - 使用原生 video 元素
+      if (videoElement && videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
+        push();
+        translate(width, 0);
+        scale(-1, 1);
+        // 使用 drawingContext 直接繪製 video
+        drawingContext.drawImage(videoElement, 0, 0, width, height);
+        pop();
+      }
+      
+      // 繪製骨架
+      if (poseResults && poseResults.poseLandmarks) {
+        drawSkeleton(poseResults.poseLandmarks);
+        updateTestLogic(poseResults.poseLandmarks);
+      }
+      
+      // 測試 UI
+      drawTestUI();
+    }
+    
+    function drawResult() {
+      background(245, 247, 250);
+      
+      if (!testSession) return;
+      
+      drawHeader('📊 測試報告');
+      
+      let cardW = min(width * 0.9, 700);
+      let cardX = (width - cardW) / 2;
+      let cardY = 150;
+      let cardH = height - cardY - 120;
+      
+      fill(255);
+      noStroke();
+      drawRoundRect(cardX, cardY, cardW, cardH, 20);
+      
+      let contentX = cardX + 40;
+      let contentY = cardY + 40;
+      
+      // 測試名稱
+      fill(60);
+      textSize(18);
+      textStyle(BOLD);
+      text(testTypes[currentTest].name, contentX, contentY);
+      
+      // 測試結果
+      contentY += 50;
+      fill(102, 126, 234);
+      textSize(48);
+      textStyle(BOLD);
+      text(testSession.result.value, contentX, contentY);
+      
+      contentY += 50;
+      fill(100);
+      textSize(16);
+      textStyle(NORMAL);
+      text(`測試時間：${testSession.result.duration}秒`, contentX, contentY);
+      
+      // 評估等級
+      contentY += 50;
+      drawRatingBadge(contentX, contentY, testSession.result.rating);
+      
+      // 動作品質
+      if (qualityScores.length > 0) {
+        contentY += 80;
+        fill(60);
+        textSize(16);
+        textStyle(BOLD);
+        text('動作品質分析', contentX, contentY);
+        
+        contentY += 30;
+        let avgQuality = qualityScores.reduce((a,b) => a+b) / qualityScores.length;
+        drawQualityBar(contentX, contentY, avgQuality);
+      }
+      
+      // 建議
+      contentY += 80;
+      fill(60);
+      textSize(16);
+      textStyle(BOLD);
+      text('專業建議', contentX, contentY);
+      
+      contentY += 30;
+      fill(100);
+      textSize(14);
+      textStyle(NORMAL);
+      text(testSession.result.recommendation, contentX, contentY, cardW - 80);
+      
+      // 按鈕
+      drawButton(width/2 - 220, height - 100, 200, 60, '儲存報告', '10b981');
+      drawButton(width/2 + 20, height - 100, 200, 60, '返回首頁', '667eea');
+    }
+    
+    function drawHistory() {
+      background(245, 247, 250);
+      
+      drawHeader('📈 歷史記錄');
+      
+      // TODO: 實作歷史記錄顯示
+      
+      fill(100);
+      textAlign(CENTER);
+      textSize(16);
+      text('歷史記錄功能開發中...', width/2, height/2);
+      
+      drawBackButton();
+    }
+    
+    // ==================== 測試邏輯 ====================
+    
+    function updateTestLogic(landmarks) {
+      if (!currentTest || !testSession) return;
+      
+      switch(currentTest) {
+        case 'chairStand':
+          updateChairStand(landmarks);
+          break;
+        case 'armCurl':
+          updateArmCurl(landmarks);
+          break;
+        case 'balance':
+          updateBalance(landmarks);
+          break;
+      }
+      
+      // 檢查時間
+      if (testTypes[currentTest].duration) {
+        let elapsed = (millis() - timerStartTime) / 1000;
+        if (elapsed >= testTypes[currentTest].duration) {
+          endTest();
+        }
+      }
+    }
+    
+    function updateChairStand(landmarks) {
+      let hip = landmarks[24];
+      let knee = landmarks[26];
+      let ankle = landmarks[28];
+      
+      if (!hip || !knee || !ankle) return;
+      
+      kneeAngle = calculateAngle(hip, knee, ankle);
+      
+      let newState = null;
+      
+      if (kneeAngle < 100) {
+        newState = 'Sit';
+      } else if (kneeAngle > 140) {
+        newState = 'Stand';
+      }
+      
+      if (newState && newState !== currentState) {
+        if (newState === 'Stand' && currentState === 'Sit') {
+          let elapsed = Date.now() - lastStateTime;
+          if (elapsed > 300) {
+            repCount++;
+            evaluateMovementQuality(landmarks);
+            playSound('count');
+          }
+        }
+        currentState = newState;
+        lastStateTime = Date.now();
+      }
+    }
+    
+    function updateArmCurl(landmarks) {
+      let shoulder = landmarks[12];
+      let elbow = landmarks[14];
+      let wrist = landmarks[16];
+      
+      if (!shoulder || !elbow || !wrist) return;
+      
+      armAngle = calculateAngle(shoulder, elbow, wrist);
+      
+      let newState = null;
+      
+      if (armAngle < 60) {
+        newState = 'Curled';
+      } else if (armAngle > 160) {
+        newState = 'Extended';
+      }
+      
+      if (newState && newState !== currentState) {
+        if (newState === 'Extended' && currentState === 'Curled') {
+          let elapsed = Date.now() - lastStateTime;
+          if (elapsed > 300) {
+            repCount++;
+            evaluateMovementQuality(landmarks);
+            playSound('count');
+          }
+        }
+        currentState = newState;
+        lastStateTime = Date.now();
+      }
+    }
+    
+    function updateBalance(landmarks) {
+      let leftAnkle = landmarks[27];
+      let rightAnkle = landmarks[28];
+      let leftKnee = landmarks[25];
+      let rightKnee = landmarks[26];
+      
+      if (!leftAnkle || !rightAnkle) return;
+      
+      // 檢測單腳站立
+      if (leftKnee.y < rightKnee.y - 0.1 && leftAnkle.visibility < 0.3) {
+        balanceLeg = 'right';
+        balanceTime++;
+      } else if (rightKnee.y < leftKnee.y - 0.1 && rightAnkle.visibility < 0.3) {
+        balanceLeg = 'left';
+        balanceTime++;
+      } else {
+        balanceLeg = null;
+      }
+    }
+    
+    function evaluateMovementQuality(landmarks) {
+      let quality = 100;
+      let currentWarnings = [];
+      
+      // 檢查膝蓋對齊
+      if (currentTest === 'chairStand') {
+        let leftKnee = landmarks[25];
+        let rightKnee = landmarks[26];
+        let kneeDistance = abs(leftKnee.x - rightKnee.x);
+        
+        if (kneeDistance < 0.05) {
+          quality -= 10;
+          currentWarnings.push('膝蓋內夾');
+        }
+        
+        // 檢查軀幹角度
+        let shoulder = landmarks[12];
+        let hip = landmarks[24];
+        let trunkAngle = atan2(hip.y - shoulder.y, hip.x - shoulder.x) * 180 / PI;
+        
+        if (abs(trunkAngle) > 30) {
+          quality -= 10;
+          currentWarnings.push('軀幹前傾過度');
+        }
+      }
+      
+      qualityScores.push(quality);
+      warnings = warnings.concat(currentWarnings);
+    }
+    
+    function startTest() {
+      testSession = {
+        patientId: patient.id,
+        testType: currentTest,
+        startTime: Date.now(),
+        endTime: null,
+        result: null
+      };
+      
+      repCount = 0;
+      currentState = null;
+      lastStateTime = Date.now();
+      timerStartTime = millis();
+      qualityScores = [];
+      warnings = [];
+      balanceTime = 0;
+      
+      phase = 'testing';
+    }
+    
+    function endTest() {
+      testSession.endTime = Date.now();
+      let duration = (testSession.endTime - testSession.startTime) / 1000;
+      
+      // 計算結果
+      let value, unit, rating, recommendation;
+      
+      switch(currentTest) {
+        case 'chairStand':
+        case 'armCurl':
+          value = repCount;
+          unit = '次';
+          rating = getRating(currentTest, repCount, patient.age, patient.gender);
+          recommendation = getRecommendation(currentTest, rating);
+          break;
+        case 'balance':
+          value = (balanceTime / 60).toFixed(1);
+          unit = '秒';
+          rating = getBalanceRating(balanceTime / 60);
+          recommendation = getRecommendation('balance', rating);
+          break;
+      }
+      
+      testSession.result = {
+        value: value + unit,
+        duration: duration.toFixed(1),
+        rating: rating,
+        recommendation: recommendation,
+        qualityScore: qualityScores.length > 0 ? 
+          (qualityScores.reduce((a,b) => a+b) / qualityScores.length).toFixed(0) : null,
+        warnings: [...new Set(warnings)]
+      };
+      
+      // 儲存記錄
+      saveTestResult(testSession);
+      
+      phase = 'result';
+    }
+    
+    // ==================== 評估系統 ====================
+    
+    function getRating(testType, count, age, gender) {
+      // 簡化的評估標準
+      const standards = {
+        chairStand: {
+          male: { excellent: 19, good: 16, average: 13, poor: 10 },
+          female: { excellent: 17, good: 14, average: 11, poor: 8 }
+        },
+        armCurl: {
+          male: { excellent: 20, good: 17, average: 14, poor: 11 },
+          female: { excellent: 18, good: 15, average: 12, poor: 9 }
+        }
+      };
+      
+      let std = standards[testType][gender === '男' ? 'male' : 'female'];
+      
+      if (count >= std.excellent) return '優秀';
+      if (count >= std.good) return '良好';
+      if (count >= std.average) return '普通';
+      if (count >= std.poor) return '需改善';
+      return '高風險';
+    }
+    
+    function getBalanceRating(seconds) {
+      if (seconds >= 10) return '優秀';
+      if (seconds >= 5) return '良好';
+      if (seconds >= 3) return '普通';
+      return '需改善';
+    }
+    
+    function getRecommendation(testType, rating) {
+      const recommendations = {
+        chairStand: {
+          '優秀': '肌力表現優異！建議維持目前運動習慣，可嘗試增加運動強度。',
+          '良好': '肌力狀況良好！建議每週進行2-3次阻力訓練以維持肌力。',
+          '普通': '建議增加下肢肌力訓練，如坐姿抬腿、牆壁深蹲等運動。',
+          '需改善': '建議諮詢物理治療師，進行漸進式肌力訓練計畫。',
+          '高風險': '建議儘速就醫評估，並在專業指導下進行復健訓練。'
+        },
+        armCurl: {
+          '優秀': '上肢肌力表現優異！建議維持目前運動習慣。',
+          '良好': '上肢肌力狀況良好！可適度增加阻力訓練強度。',
+          '普通': '建議增加上肢肌力訓練，如啞鈴彎舉、推舉等運動。',
+          '需改善': '建議諮詢專業人員，制定個人化訓練計畫。',
+          '高風險': '建議就醫評估，避免過度負重訓練。'
+        },
+        balance: {
+          '優秀': '平衡能力優異！建議維持目前運動習慣。',
+          '良好': '平衡能力良好！可嘗試更具挑戰性的平衡訓練。',
+          '普通': '建議進行平衡訓練，如單腳站立、太極拳等。',
+          '需改善': '平衡能力需加強，建議諮詢物理治療師進行平衡訓練，並注意居家環境安全。'
+        }
+      };
+      
+      return recommendations[testType][rating] || '請諮詢專業醫療人員。';
+    }
+    
+    // ==================== UI 輔助函式 ====================
+    
+    function drawButton(x, y, w, h, label, color='667eea', outlined=false) {
+      push();
+      
+      let isHover = mouseX > x && mouseX < x + w && mouseY > y && mouseY < y + h;
+      
+      if (outlined) {
+        stroke(color === '667eea' ? color : '#' + color);
+        strokeWeight(2);
+        fill(255);
+      } else {
+        noStroke();
+        if (color === 'cccccc') {
+          fill(204, 204, 204);
+        } else {
+          fill('#' + color);
+        }
+      }
+      
+      if (isHover && color !== 'cccccc') {
+        drawingContext.shadowBlur = 15;
+        drawingContext.shadowColor = `rgba(${color === '667eea' ? '102, 126, 234' : '16, 185, 129'}, 0.5)`;
+      }
+      
+      drawRoundRect(x, y, w, h, 12);
+      
+      drawingContext.shadowBlur = 0;
+      
+      fill(outlined ? '#' + color : 255);
+      noStroke();
+      textAlign(CENTER, CENTER);
+      textSize(18);
+      textStyle(BOLD);
+      text(label, x + w/2, y + h/2);
+      
+      pop();
+    }
+    
+    function drawHeader(title) {
+      fill(102, 126, 234);
+      noStroke();
+      rect(0, 0, width, 120);
+      
+      fill(255);
+      textAlign(CENTER, CENTER);
+      textSize(28);
+      textStyle(BOLD);
+      text(title, width/2, 60);
+    }
+    
+    function drawBackButton() {
+      let x = 20;
+      let y = 20;
+      let size = 50;
+      
+      fill(255, 255, 255, 200);
+      noStroke();
+      circle(x + size/2, y + size/2, size);
+      
+      fill(102, 126, 234);
+      textAlign(CENTER, CENTER);
+      textSize(24);
+      text('←', x + size/2, y + size/2);
+    }
+    
+    function drawRoundRect(x, y, w, h, r) {
+      beginShape();
+      vertex(x + r, y);
+      vertex(x + w - r, y);
+      quadraticVertex(x + w, y, x + w, y + r);
+      vertex(x + w, y + h - r);
+      quadraticVertex(x + w, y + h, x + w - r, y + h);
+      vertex(x + r, y + h);
+      quadraticVertex(x, y + h, x, y + h - r);
+      vertex(x, y + r);
+      quadraticVertex(x, y, x + r, y);
+      endShape(CLOSE);
+    }
+    
+    function drawTestCard(x, y, w, h, test, testKey) {
+      push();
+      
+      let isHover = mouseX > x && mouseX < x + w && mouseY > y && mouseY < y + h;
+      
+      fill(255);
+      noStroke();
+      
+      if (isHover) {
+        drawingContext.shadowBlur = 20;
+        drawingContext.shadowColor = 'rgba(102, 126, 234, 0.3)';
+      }
+      
+      drawRoundRect(x, y, w, h, 15);
+      
+      drawingContext.shadowBlur = 0;
+      
+      // 圖標
+      textAlign(LEFT, CENTER);
+      textSize(48);
+      text(test.icon, x + 30, y + h/2);
+      
+      // 文字資訊
+      let textX = x + 100;
+      
+      fill(60);
+      textSize(20);
+      textStyle(BOLD);
+      textAlign(LEFT, TOP);
+      text(test.name, textX, y + 30);
+      
+      fill(100);
+      textSize(14);
+      textStyle(NORMAL);
+      text(`目標：${test.target}`, textX, y + 60);
+      text(`時間：${test.duration ? test.duration + '秒' : '不限'}`, textX, y + 85);
+      text(`適用：${test.ageGroup}`, textX, y + 110);
+      
+      // 箭頭
+      fill(102, 126, 234);
+      textAlign(RIGHT, CENTER);
+      textSize(24);
+      text('→', x + w - 30, y + h/2);
+      
+      pop();
+    }
+    
+    function drawGenderButtons(x, y) {
+      let genders = ['男', '女'];
+      let btnW = max(width * 0.25, 100);   // 螢幕寬度 25%，最小 100px
+      let btnH = max(height * 0.065, 50);  // 螢幕高度 6.5%，最小 50px
+      let spacing = max(width * 0.04, 15); // 自動間距
+      
+      for (let i = 0; i < genders.length; i++) {
+        let btnX = x + i * (btnW + spacing);
+        let isSelected = patient.gender === genders[i];
+        let isHover = mouseX > btnX && mouseX < btnX + btnW && 
+                      mouseY > y && mouseY < y + btnH;
+        
+        if (isSelected) {
+          fill(102, 126, 234);
+        } else {
+          fill(240);
+        }
+        
+        noStroke();
+        drawRoundRect(btnX, y, btnW, btnH, 10);
+        
+        fill(isSelected ? 255 : 100);
+        textAlign(CENTER, CENTER);
+        textSize(max(width * 0.045, 16));  // 自動字體大小
+        text(genders[i], btnX + btnW/2, y + btnH/2);
+      }
+    }
+    
+    function drawMedicalHistory(x, y) {
+      let conditions = ['高血壓', '糖尿病', '心臟病', '關節炎', '骨質疏鬆'];
+      let btnW = max(width * 0.26, 110);   // 螢幕寬度 26%，最小 110px
+      let btnH = max(height * 0.055, 45);  // 螢幕高度 5.5%，最小 45px
+      let spacing = max(width * 0.02, 10); // 自動間距
+      let cols = width < 500 ? 2 : 3;      // 小螢幕顯示 2 欄，大螢幕 3 欄
+      
+      for (let i = 0; i < conditions.length; i++) {
+        let col = i % cols;
+        let row = floor(i / cols);
+        let btnX = x + col * (btnW + spacing);
+        let btnY = y + row * (btnH + spacing);
+        
+        let isSelected = patient.medicalHistory.includes(conditions[i]);
+        
+        if (isSelected) {
+          fill(239, 68, 68, 50);
+          stroke(239, 68, 68);
+        } else {
+          fill(240);
+          stroke(200);
+        }
+        
+        strokeWeight(2);
+        drawRoundRect(btnX, btnY, btnW, btnH, 8);
+        
+        fill(isSelected ? 239 : 100, isSelected ? 68 : 100, isSelected ? 68 : 100);
+        noStroke();
+        textAlign(CENTER, CENTER);
+        textSize(max(width * 0.035, 13));  // 自動字體大小
+        text(conditions[i], btnX + btnW/2, btnY + btnH/2);
+      }
+    }
+    
+    function drawTestUI() {
+      // 計數器
+      fill(0, 0, 0, 180);
+      noStroke();
+      drawRoundRect(20, 20, 150, 80, 15);
+      
+      fill(255);
+      textAlign(LEFT, CENTER);
+      textSize(48);
+      textStyle(BOLD);
+      text(repCount, 40, 45);
+      
+      fill(200);
+      textSize(16);
+      text('次', 100, 45);
+      
+      // 計時器
+      let elapsed = (millis() - timerStartTime) / 1000;
+      let remaining = testTypes[currentTest].duration - elapsed;
+      displayTime = remaining > 0 ? remaining.toFixed(1) : '0.0';
+      
+      fill(0, 0, 0, 180);
+      drawRoundRect(width - 170, 20, 150, 80, 15);
+      
+      fill(remaining < 5 ? color(239, 68, 68) : color(16, 185, 129));
+      textAlign(CENTER, CENTER);
+      textSize(32);
+      text(displayTime, width - 95, 45);
+      
+      fill(200);
+      textSize(14);
+      text('秒', width - 95, 75);
+      
+      // 狀態提示
+      let stateText = '';
+      
+      switch(currentTest) {
+        case 'chairStand':
+          if (currentState === 'Sit') stateText = '請站起 ⬆️';
+          else if (currentState === 'Stand') stateText = '請坐下 🪑';
+          else stateText = '準備開始';
+          break;
+        case 'armCurl':
+          if (currentState === 'Curled') stateText = '伸直手臂';
+          else if (currentState === 'Extended') stateText = '彎曲手臂';
+          else stateText = '準備開始';
+          break;
+        case 'balance':
+          if (balanceLeg) stateText = `${balanceLeg === 'left' ? '左' : '右'}腳站立中`;
+          else stateText = '抬起一腳';
+          break;
+      }
+      
+      fill(0, 0, 0, 165);
+      let stateW = textWidth(stateText) + 80;
+      drawRoundRect(width/2 - stateW/2, height * 0.15, stateW, 65, 20);
+      
+      fill(255);
+      textAlign(CENTER, CENTER);
+      textSize(24);
+      textStyle(BOLD);
+      text(stateText, width/2, height * 0.15 + 32);
+      
+      // 角度顯示（調試用）
+      if (kneeAngle || armAngle) {
+        let angle = kneeAngle || armAngle;
+        let angleText = `角度: ${angle.toFixed(0)}°`;
+        
+        fill(0, 0, 0, 150);
+        let angleW = textWidth(angleText) + 40;
+        drawRoundRect(width/2 - angleW/2, height - 80, angleW, 50, 10);
+        
+        fill(170);
+        textSize(16);
+        text(angleText, width/2, height - 55);
+      }
+    }
+    
+    function drawSkeleton(landmarks) {
+      stroke(16, 185, 129);
+      strokeWeight(4);
+      noFill();
+      
+      let connections = [
+        [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
+        [11, 23], [12, 24], [23, 24],
+        [23, 25], [25, 27], [24, 26], [26, 28]
+      ];
+      
+      for (let conn of connections) {
+        let p1 = landmarks[conn[0]];
+        let p2 = landmarks[conn[1]];
+        if (p1 && p2) {
+          let x1 = width - (p1.x * width);
+          let y1 = p1.y * height;
+          let x2 = width - (p2.x * width);
+          let y2 = p2.y * height;
+          line(x1, y1, x2, y2);
+        }
+      }
+      
+      fill(255, 87, 34);
+      noStroke();
+      for (let i = 0; i < landmarks.length; i++) {
+        let x = width - (landmarks[i].x * width);
+        let y = landmarks[i].y * height;
+        circle(x, y, 8);
+      }
+    }
+    
+    function drawRatingBadge(x, y, rating) {
+      let colors = {
+        '優秀': ['16', '185', '129'],
+        '良好': ['59', '130', '246'],
+        '普通': ['245', '158', '11'],
+        '需改善': ['249', '115', '22'],
+        '高風險': ['239', '68', '68']
+      };
+      
+      let col = colors[rating] || ['156', '163', '175'];
+      
+      fill(parseInt(col[0]), parseInt(col[1]), parseInt(col[2]), 30);
+      noStroke();
+      drawRoundRect(x, y, 120, 50, 10);
+      
+      fill(parseInt(col[0]), parseInt(col[1]), parseInt(col[2]));
+      textAlign(CENTER, CENTER);
+      textSize(20);
+      textStyle(BOLD);
+      text(rating, x + 60, y + 25);
+    }
+    
+    function drawQualityBar(x, y, quality) {
+      // 背景
+      fill(240);
+      noStroke();
+      drawRoundRect(x, y, 300, 30, 15);
+      
+      // 進度條
+      let barColor = quality >= 80 ? color(16, 185, 129) :
+                     quality >= 60 ? color(245, 158, 11) :
+                     color(239, 68, 68);
+      fill(barColor);
+      drawRoundRect(x, y, quality * 3, 30, 15);
+      
+      // 分數文字
+      fill(60);
+      textAlign(CENTER, CENTER);
+      textSize(16);
+      textStyle(BOLD);
+      text(`${quality.toFixed(0)}%`, x + 150, y + 15);
+    }
+    
+    // ==================== 輔助函式 ====================
+    
+    function calculateAngle(a, b, c) {
+      let radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
+      let angle = Math.abs(radians * 180.0 / Math.PI);
+      if (angle > 180.0) {
+        angle = 360 - angle;
+      }
+      return angle;
+    }
+    
+    function playSound(type) {
+      // 簡單的音效反饋
+      if ('AudioContext' in window || 'webkitAudioContext' in window) {
+        let audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        let oscillator = audioContext.createOscillator();
+        let gainNode = audioContext.createGain();
+        
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        
+        oscillator.frequency.value = type === 'count' ? 800 : 400;
+        oscillator.type = 'sine';
+        
+        gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.1);
+        
+        oscillator.start(audioContext.currentTime);
+        oscillator.stop(audioContext.currentTime + 0.1);
+      }
+    }
+    
+    function saveTestResult(session) {
+      testHistory.push({
+        id: Date.now(),
+        patientId: session.patientId,
+        patientName: patient.name,
+        testType: session.testType,
+        testName: testTypes[session.testType].name,
+        timestamp: session.endTime,
+        result: session.result
+      });
+      
+      localStorage.setItem('medicalTestHistory', JSON.stringify(testHistory));
+    }
+    
+    function loadTestHistory() {
+      let stored = localStorage.getItem('medicalTestHistory');
+      if (stored) {
+        testHistory = JSON.parse(stored);
+      }
+    }
+    
+    // ==================== 事件處理 ====================
+    
+    function mousePressed() {
+      switch(phase) {
+        case 'home':
+          handleHomeClick();
+          break;
+        case 'patientInfo':
+          handlePatientInfoClick();
+          break;
+        case 'testSelection':
+          handleTestSelectionClick();
+          break;
+        case 'testInstructions':
+          handleInstructionsClick();
+          break;
+        case 'result':
+          handleResultClick();
+          break;
+        case 'history':
+          handleHistoryClick();
+          break;
+      }
+    }
+    
+    function handleHomeClick() {
+      // 開始新測試 - 直接進入測試選擇
+      if (mouseX > width/2 - 150 && mouseX < width/2 + 150 &&
+          mouseY > 280 && mouseY < 350) {
+        // 設定預設受測者資料
+        patient = { 
+          name: '受測者', 
+          age: '65', 
+          gender: '男', 
+          medicalHistory: [], 
+          id: Date.now() 
+        };
+        phase = 'testSelection';  // 直接跳到測試選擇
+      }
+      
+      // 歷史記錄
+      if (mouseX > width/2 - 150 && mouseX < width/2 + 150 &&
+          mouseY > 380 && mouseY < 450) {
+        phase = 'history';
+      }
+    }
+    
+    function createPatientInputs() {
+      // 姓名輸入框
+      if (nameInput) nameInput.remove();
+      nameInput = createInput('');
+      nameInput.attribute('placeholder', '請輸入姓名');
+      
+      // 根據螢幕大小自動調整所有尺寸
+      let inputHeight = max(height * 0.07, 50);     // 螢幕高度的 7%，最小 50px
+      let fontSize = max(width * 0.045, 18);        // 螢幕寬度的 4.5%，最小 18px
+      let padding = max(width * 0.04, 15);          // 自動內距
+      
+      nameInput.style('font-size', fontSize + 'px');
+      nameInput.style('padding', padding + 'px ' + (padding * 1.3) + 'px');
+      nameInput.style('height', inputHeight + 'px');
+      nameInput.style('border', '2px solid #ddd');
+      nameInput.style('border-radius', '12px');
+      nameInput.style('width', min(width * 0.85, 540) + 'px');
+      nameInput.style('box-sizing', 'border-box');
+      nameInput.style('-webkit-appearance', 'none');
+      nameInput.input(() => { patient.name = nameInput.value(); });
+      
+      // 年齡輸入框
+      if (ageInput) ageInput.remove();
+      ageInput = createInput('');
+      ageInput.attribute('type', 'number');
+      ageInput.attribute('placeholder', '請輸入年齡');
+      ageInput.style('font-size', fontSize + 'px');
+      ageInput.style('padding', padding + 'px ' + (padding * 1.3) + 'px');
+      ageInput.style('height', inputHeight + 'px');
+      ageInput.style('border', '2px solid #ddd');
+      ageInput.style('border-radius', '12px');
+      ageInput.style('width', min(width * 0.85, 540) + 'px');
+      ageInput.style('box-sizing', 'border-box');
+      ageInput.style('-webkit-appearance', 'none');
+      ageInput.input(() => { patient.age = ageInput.value(); });
+      
+      updateInputPositions();
+    }
+    
+    function updateInputPositions() {
+      if (phase !== 'patientInfo') {
+        if (nameInput) nameInput.hide();
+        if (ageInput) ageInput.hide();
+        return;
+      }
+      
+      let cardW = min(width * 0.9, 600);
+      let cardX = (width - cardW) / 2;
+      let cardY = 150;
+      let formX = cardX + 40;
+      let formY = cardY + 60;
+      
+      if (nameInput) {
+        nameInput.position(formX, formY + 70);  // 在「姓名」標籤下方
+        nameInput.show();
+      }
+      
+      if (ageInput) {
+        ageInput.position(formX, formY + 180);  // 增加間距到 180（原本 160）
+        ageInput.show();
+      }
+    }
+    
+    function handlePatientInfoClick() {
+      let cardW = min(width * 0.9, 600);
+      let cardX = (width - cardW) / 2;
+      let cardY = 150;
+      let formX = cardX + 40;
+      let formY = cardY + 60;
+      
+      // 性別按鈕 - 使用動態尺寸
+      let genders = ['男', '女'];
+      let btnW = max(width * 0.25, 100);
+      let btnH = max(height * 0.065, 50);
+      let spacing = max(width * 0.04, 15);
+      let genderY = formY + 300;
+      
+      for (let i = 0; i < genders.length; i++) {
+        let btnX = formX + i * (btnW + spacing);
+        if (mouseX > btnX && mouseX < btnX + btnW &&
+            mouseY > genderY && mouseY < genderY + btnH) {
+          patient.gender = genders[i];
+        }
+      }
+      
+      // 病史勾選 - 使用動態尺寸
+      let conditions = ['高血壓', '糖尿病', '心臟病', '關節炎', '骨質疏鬆'];
+      let checkW = max(width * 0.26, 110);
+      let checkH = max(height * 0.055, 45);
+      let checkSpacing = max(width * 0.02, 10);
+      let cols = width < 500 ? 2 : 3;
+      let historyY = formY + 420;
+      
+      for (let i = 0; i < conditions.length; i++) {
+        let col = i % cols;
+        let row = floor(i / cols);
+        let btnX = formX + col * (checkW + checkSpacing);
+        let btnY = historyY + row * (checkH + checkSpacing);
+        
+        if (mouseX > btnX && mouseX < btnX + checkW &&
+            mouseY > btnY && mouseY < btnY + checkH) {
+          let index = patient.medicalHistory.indexOf(conditions[i]);
+          if (index > -1) {
+            patient.medicalHistory.splice(index, 1);
+          } else {
+            patient.medicalHistory.push(conditions[i]);
+          }
+        }
+      }
+      
+      // 下一步按鈕
+      let canProceed = patient.name && patient.age && patient.gender;
+      if (canProceed) {
+        if (mouseX > width/2 - 100 && mouseX < width/2 + 100 &&
+            mouseY > cardY + (min(height * 0.75, 700)) - 80 &&
+            mouseY < cardY + (min(height * 0.75, 700)) - 20) {
+          phase = 'testSelection';
+          if (nameInput) nameInput.hide();
+          if (ageInput) ageInput.hide();
+        }
+      }
+      
+      // 返回按鈕
+      if (mouseX > 20 && mouseX < 70 && mouseY > 20 && mouseY < 70) {
+        phase = 'home';
+        if (nameInput) nameInput.hide();
+        if (ageInput) ageInput.hide();
+      }
+    }
+    
+    function handleTestSelectionClick() {
+      let startY = 150;
+      let cardSpacing = 20;
+      let cardH = 180;
+      let cardW = min(width * 0.9, 500);
+      let cardX = (width - cardW) / 2;
+      
+      let tests = Object.keys(testTypes);
+      
+      for (let i = 0; i < tests.length; i++) {
+        let y = startY + i * (cardH + cardSpacing);
+        
+        if (mouseX > cardX && mouseX < cardX + cardW &&
+            mouseY > y && mouseY < y + cardH) {
+          currentTest = tests[i];
+          phase = 'testInstructions';
+        }
+      }
+      
+      // 返回按鈕 - 返回首頁
+      if (mouseX > 20 && mouseX < 70 && mouseY > 20 && mouseY < 70) {
+        phase = 'home';
+      }
+    }
+    
+    function handleInstructionsClick() {
+      // 開始測試按鈕
+      if (mouseX > width/2 - 100 && mouseX < width/2 + 100 &&
+          mouseY > height - 140 && mouseY < height - 80) {
+        startTest();
+      }
+      
+      // 返回按鈕
+      if (mouseX > 20 && mouseX < 70 && mouseY > 20 && mouseY < 70) {
+        phase = 'testSelection';
+      }
+    }
+    
+    function handleResultClick() {
+      // 儲存報告
+      if (mouseX > width/2 - 220 && mouseX < width/2 - 20 &&
+          mouseY > height - 100 && mouseY < height - 40) {
+        alert('報告已儲存！');
+      }
+      
+      // 返回首頁
+      if (mouseX > width/2 + 20 && mouseX < width/2 + 220 &&
+          mouseY > height - 100 && mouseY < height - 40) {
+        phase = 'home';
+        currentTest = null;
+        testSession = null;
+      }
+    }
+    
+    function handleHistoryClick() {
+      // 返回按鈕
+      if (mouseX > 20 && mouseX < 70 && mouseY > 20 && mouseY < 70) {
+        phase = 'home';
+      }
+    }
+    
+    function touchStarted() {
+      mousePressed();
+      return false;
+    }
+    
+    function windowResized() {
+      resizeCanvas(windowWidth, windowHeight);
+      updateInputPositions();
+    }
+  </script>
+</body>
+</html>
